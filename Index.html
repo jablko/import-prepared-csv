@@ -1,9 +1,146 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
   <head>
-    <base target="_top">
+    <base target="_top" />
+    <link
+      rel="stylesheet"
+      href="https://ssl.gstatic.com/docs/script/css/add-ons1.css"
+    />
   </head>
   <body>
-    
+    <form onsubmit="onSubmit(event)">
+      <div class="block">
+        <input
+          type="file"
+          accept="text/csv"
+          onclick="this.value = ''"
+          onchange="onChange(event)"
+        />
+      </div>
+      <div class="block">
+        <button id="submit" class="action" hidden></button>
+        <button type="button" onclick="google.script.host.close()">
+          Cancel
+        </button>
+      </div>
+    </form>
+    <div class="block"><div class="error" hidden></div></div>
+    <div class="block">
+      <div id="preview" hidden>
+        <h2>Number of transactions to import</h2>
+        <table>
+          <tr id="add">
+            <th>To add</th>
+            <td></td>
+          </tr>
+          <tr id="modify">
+            <th>To modify</th>
+            <td></td>
+          </tr>
+          <tr id="identical">
+            <th>Already identical</th>
+            <td></td>
+          </tr>
+          <tr id="total">
+            <th>Total</th>
+            <td></td>
+          </tr>
+        </table>
+        <h2>Which headers match</h2>
+        <table></table>
+      </div>
+    </div>
+    <script>
+      function onChange(event) {
+        form.elements.submit.disabled = true;
+        preview.hidden = true;
+        error.hidden = true;
+        const [file] = event.target.files;
+        reader.readAsText(file);
+      }
+
+      const [form] = document.forms;
+      const preview = document.getElementById("preview");
+      const [error] = document.getElementsByClassName("error");
+      const reader = new FileReader();
+      reader.addEventListener("load", () => onLoad());
+      reader.addEventListener("error", () => onError());
+
+      async function onLoad() {
+        try {
+          const { nAdd, nModify, nTotal, header } = await new Promise(
+            (resolve, reject) =>
+              google.script.run
+                .withSuccessHandler(resolve)
+                .withFailureHandler(reject)
+                .doImport(reader.result, true),
+          );
+          nTable.rows.add.cells[1].replaceChildren(nAdd);
+          nTable.rows.add.hidden = nAdd < 1;
+          nTable.rows.modify.cells[1].replaceChildren(nModify);
+          nTable.rows.modify.hidden = nModify < 1;
+          nTable.rows.identical.cells[1].replaceChildren(
+            nTotal - nAdd - nModify,
+          );
+          nTable.rows.identical.hidden = nTotal - nAdd - nModify < 1;
+          nTable.rows.total.cells[1].replaceChildren(nTotal);
+          headerTable.replaceChildren(
+            ...header.map(([name, found]) => createRow(name, found)),
+          );
+          preview.hidden = false;
+          if (nAdd + nModify > 0) {
+            form.elements.submit.replaceChildren(
+              nAdd > 0 && nModify > 0
+                ? "Add and modify transactions"
+                : nAdd > 0
+                  ? "Add transactions"
+                  : "Modify transactions",
+            );
+            form.elements.submit.disabled = header.every(([, found]) => !found);
+            form.elements.submit.hidden = false;
+          }
+        } catch (e) {
+          error.replaceChildren(e);
+          error.hidden = false;
+        }
+      }
+
+      const [nTable, headerTable] = preview.getElementsByTagName("table");
+
+      function createRow(name, found) {
+        const th = document.createElement("th");
+        th.append(name);
+        const td = document.createElement("td");
+        td.append(emoji[Number(found)]);
+        const tr = document.createElement("tr");
+        tr.append(th, td);
+        return tr;
+      }
+
+      const emoji = ["\u2753", "\u27A1\uFE0F"];
+
+      function onError() {
+        error.replaceChildren(reader.error);
+        error.hidden = false;
+      }
+
+      async function onSubmit(event) {
+        event.preventDefault();
+        form.elements.submit.disabled = true;
+        try {
+          await new Promise((resolve, reject) =>
+            google.script.run
+              .withSuccessHandler(resolve)
+              .withFailureHandler(reject)
+              .doImport(reader.result, false),
+          );
+          google.script.host.close();
+        } catch (e) {
+          error.replaceChildren(e);
+          error.hidden = false;
+          form.elements.submit.disabled = false;
+        }
+      }
+    </script>
   </body>
 </html>
