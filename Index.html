@@ -1,9 +1,128 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
   <head>
-    <base target="_top">
+    <base target="_top" />
+    <link
+      rel="stylesheet"
+      href="https://ssl.gstatic.com/docs/script/css/add-ons1.css"
+    />
   </head>
   <body>
-    
+    <form onsubmit="onSubmit(event)">
+      <input type="file" accept="text/csv" onchange="onChange(event)" />
+      <input class="action" type="submit" value="Add transactions" disabled />
+      <input
+        type="button"
+        value="Cancel"
+        onclick="google.script.host.close()"
+      />
+    </form>
+    <div class="error" hidden></div>
+    <div id="preview" hidden>
+      <h2>Number of transactions to import</h2>
+      <table>
+        <tr>
+          <th>To add</th>
+          <td></td>
+        </tr>
+        <tr>
+          <th>To modify</th>
+          <td></td>
+        </tr>
+        <tr>
+          <th>Already identical</th>
+          <td></td>
+        </tr>
+        <tr>
+          <th>Total</th>
+          <td></td>
+        </tr>
+      </table>
+      <h2>Which headers match</h2>
+      <table id="headers"></table>
+    </div>
+    <script>
+      function onChange(event) {
+        submit.disabled = true;
+        preview.hidden = true;
+        error.hidden = true;
+        const [file] = event.target.files;
+        if (file !== undefined) {
+          reader.readAsText(file);
+        }
+      }
+
+      const submit = document.querySelector("input[type=submit]");
+      const preview = document.getElementById("preview");
+      const [error] = document.getElementsByClassName("error");
+      const reader = new FileReader();
+      reader.addEventListener("load", () => onLoad());
+
+      async function onLoad() {
+        try {
+          const { nAdd, nModify, nTotal, headers } = await new Promise(
+            (resolve, reject) =>
+              google.script.run
+                .withSuccessHandler(resolve)
+                .withFailureHandler(reject)
+                .doImport(reader.result, true),
+          );
+          add.replaceChildren(nAdd);
+          modify.replaceChildren(nModify);
+          identical.replaceChildren(nTotal - nAdd - nModify);
+          total.replaceChildren(nTotal);
+          table.replaceChildren(...getRows(headers));
+          preview.hidden = false;
+          if (nAdd + nModify > 0) {
+            submit.value =
+              nAdd > 0 && nModify > 0
+                ? "Add and modify transactions"
+                : nAdd > 0
+                  ? "Add transactions"
+                  : "Modify transactions";
+            submit.disabled = !headers.some(([, found]) => found);
+          }
+        } catch (e) {
+          error.replaceChildren(e);
+          error.hidden = false;
+        }
+      }
+
+      const [add, modify, identical, total] =
+        preview.getElementsByTagName("td");
+      const table = document.getElementById("headers");
+
+      function* getRows(headers) {
+        for (const [name, found] of headers) {
+          const th = document.createElement("th");
+          th.append(name);
+          const td = document.createElement("td");
+          td.append(emoji[Number(found)]);
+          const tr = document.createElement("tr");
+          tr.append(th, td);
+          yield tr;
+        }
+      }
+
+      const emoji = ["❌", "✔️"];
+
+      async function onSubmit(event) {
+        event.preventDefault();
+        submit.disabled = true;
+        try {
+          await new Promise((resolve, reject) =>
+            google.script.run
+              .withSuccessHandler(resolve)
+              .withFailureHandler(reject)
+              .doImport(reader.result, false),
+          );
+          google.script.host.close();
+        } catch (e) {
+          error.replaceChildren(e);
+          error.hidden = false;
+          submit.disabled = false;
+        }
+      }
+    </script>
   </body>
 </html>
