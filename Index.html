@@ -11,11 +11,20 @@
     <form onsubmit="onSubmit(event)">
       <div class="block">
         <input
+          id="file"
           type="file"
           accept="text/csv"
-          onclick="this.value = ''"
+          onclick="onClick(event)"
           onchange="onChange(event)"
         />
+      </div>
+      <div class="block">
+        <div class="form-group" hidden>
+          <label for="crosswalk">CSV format</label>
+          <select id="crosswalk" onchange="onChange(event)">
+            <option>Native (bypass remap)</option>
+          </select>
+        </div>
       </div>
       <div class="block">
         <button id="submit" class="action" hidden></button>
@@ -51,30 +60,46 @@
       </div>
     </div>
     <script>
-      function onChange(event) {
-        form.elements.submit.disabled = true;
+      function onClick() {
+        form.elements.file.value = "";
+        form.elements.crosswalk.parentElement.hidden = true;
+        form.elements.crosswalk.value = "";
+        form.elements.submit.hidden = true;
         preview.hidden = true;
-        error.hidden = true;
-        const [file] = event.target.files;
-        reader.readAsText(file);
+        errorDiv.hidden = true;
       }
 
       const [form] = document.forms;
+
+      function onChange() {
+        form.elements.submit.disabled = true;
+        preview.hidden = true;
+        errorDiv.hidden = true;
+        const [file] = form.elements.file.files;
+        reader.readAsText(file);
+      }
+
       const preview = document.getElementById("preview");
-      const [error] = document.getElementsByClassName("error");
+      const [errorDiv] = document.getElementsByClassName("error");
       const reader = new FileReader();
       reader.addEventListener("load", () => onLoad());
       reader.addEventListener("error", () => onError());
 
       async function onLoad() {
         try {
-          const { nAdd, nModify, nTotal, header } = await new Promise(
-            (resolve, reject) =>
+          const { crosswalk, crosswalks, nAdd, nModify, nTotal, header } =
+            await new Promise((resolve, reject) =>
               google.script.run
                 .withSuccessHandler(resolve)
                 .withFailureHandler(reject)
-                .doImport(reader.result, true),
+                .doImport(reader.result, form.elements.crosswalk.value, true),
+            );
+          form.elements.crosswalk.replaceChildren(
+            noCrosswalk,
+            ...crosswalks.map((text) => createOption(text)),
           );
+          form.elements.crosswalk.value = crosswalk;
+          form.elements.crosswalk.parentElement.hidden = crosswalks.length < 1;
           nTable.rows.add.cells[1].replaceChildren(nAdd);
           nTable.rows.add.hidden = nAdd < 1;
           nTable.rows.modify.cells[1].replaceChildren(nModify);
@@ -85,7 +110,9 @@
           nTable.rows.identical.hidden = nTotal - nAdd - nModify < 1;
           nTable.rows.total.cells[1].replaceChildren(nTotal);
           headerTable.replaceChildren(
-            ...header.map(([name, found]) => createRow(name, found)),
+            ...header.map(({ name, found, error, summary }) =>
+              createRow(name, found, error, summary),
+            ),
           );
           preview.hidden = false;
           if (nAdd + nModify > 0) {
@@ -96,32 +123,60 @@
                   ? "Add transactions"
                   : "Modify transactions",
             );
-            form.elements.submit.disabled = header.every(([, found]) => !found);
+            form.elements.submit.disabled =
+              header.every(({ found }) => !found) ||
+              header.some(({ error, summary }) => isError(error, summary));
             form.elements.submit.hidden = false;
           }
         } catch (e) {
-          error.replaceChildren(e);
-          error.hidden = false;
+          errorDiv.replaceChildren(e);
+          errorDiv.hidden = false;
         }
+      }
+
+      const [noCrosswalk] = form.elements.crosswalk.options;
+
+      function createOption(text) {
+        const option = document.createElement("option");
+        option.append(text);
+        return option;
       }
 
       const [nTable, headerTable] = preview.getElementsByTagName("table");
 
-      function createRow(name, found) {
+      function createRow(name, found, error, summary) {
         const th = document.createElement("th");
         th.append(name);
-        const td = document.createElement("td");
-        td.append(emoji[Number(found)]);
+        const emojiTd = document.createElement("td");
+        emojiTd.append(
+          isError(error, summary) ? "\u26A0\uFE0F" : emoji[Number(found)],
+        );
+        const summaryTd = document.createElement("td");
+        if (error ?? summary !== undefined) {
+          if (isError(error, summary)) {
+            summaryTd.classList.add("error");
+          }
+          summaryTd.append(error ?? summary);
+        }
         const tr = document.createElement("tr");
-        tr.append(th, td);
+        tr.append(th, emojiTd, summaryTd);
         return tr;
+      }
+
+      function isError(error, summary) {
+        switch (summary) {
+          case "Invalid Date":
+          case "NaN":
+            return true;
+        }
+        return error !== undefined;
       }
 
       const emoji = ["\u2753", "\u27A1\uFE0F"];
 
       function onError() {
-        error.replaceChildren(reader.error);
-        error.hidden = false;
+        errorDiv.replaceChildren(reader.error);
+        errorDiv.hidden = false;
       }
 
       async function onSubmit(event) {
@@ -132,12 +187,12 @@
             google.script.run
               .withSuccessHandler(resolve)
               .withFailureHandler(reject)
-              .doImport(reader.result, false),
+              .doImport(reader.result, form.elements.crosswalk.value, false),
           );
           google.script.host.close();
         } catch (e) {
-          error.replaceChildren(e);
-          error.hidden = false;
+          errorDiv.replaceChildren(e);
+          errorDiv.hidden = false;
           form.elements.submit.disabled = false;
         }
       }
