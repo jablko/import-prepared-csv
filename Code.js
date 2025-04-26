@@ -1,3 +1,5 @@
+/** @import {CellValue, DetailedCellError} from "hyperformula" */
+
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createAddonMenu().addItem("Start", "start").addToUi();
@@ -14,9 +16,10 @@ function start() {
  * and/or modify transactions.
  *
  * @param {string} csv
+ * @param {unknown} crosswalk
  * @param {boolean} preview
  */
-function doImport(csv, preview) {
+function doImport(csv, crosswalk, preview) {
   const sheet = /** @type {GoogleAppsScript.Spreadsheet.Sheet} */ (
     ss.getSheetByName("Transactions")
   );
@@ -49,23 +52,34 @@ function doImport(csv, preview) {
    * @type {ReadonlyMap<unknown, readonly number[]>}
    */
   const byID = invertEntries(idRange.getValues().flat().entries());
-  /**
-   * @type {[
-   *   (readonly string[])?,
-   *   ...(readonly (string | number | Date)[][]),
-   * ]}
-   */
-  const [headerRow, ...data] = Utilities.parseCsv(csv);
-  if (headerRow === undefined || headerRow.length < 1) {
+  /** @type {[(readonly string[])?, ...(readonly string[][])]} */
+  const [csvHeaderRow, ...csvData] = Utilities.parseCsv(csv);
+  if (csvHeaderRow === undefined || csvHeaderRow.length < 1) {
     throw new Error("Empty CSV/headers");
   }
+  /**
+   * @type {{
+   *   headerRow: readonly string[];
+   *   data: readonly (CellValue | Date)[][];
+   *   crosswalks: readonly unknown[];
+   * }}
+   */
+  const { headerRow, data, crosswalks } = ({ crosswalk } = remap(
+    csvHeaderRow,
+    csvData,
+    crosswalk,
+  ));
   /**
    * Header names -> (singular) CSV column numbers. We exploit it being the same
    * size as the number of CSV headers/columns.
    */
   const header = new Map(headerRow.map((name, j) => [name, j]));
   if (header.size !== headerRow.length) {
-    throw new Error("Duplicate CSV headers");
+    throw new Error(
+      crosswalk === "Native (bypass remap)"
+        ? "Duplicate CSV headers"
+        : "Duplicate crosswalk headers",
+    );
   }
   // Prepare CSV
   prepDate(header, data);
@@ -111,9 +125,9 @@ function doImport(csv, preview) {
   const addCMin = Math.min(cMin, tHeader.get("Date Added") ?? Math.min());
   const addCMax = Math.max(cMax, tHeader.get("Date Added") ?? Math.max());
   // Partition transactions to add and ones to modify
-  /** @type {(string | number | Date)[][]} */
+  /** @type {(CellValue | Date)[][]} */
   const addData = [];
-  /** @type {(readonly (string | number | Date)[])[]} */
+  /** @type {(readonly (CellValue | Date)[])[]} */
   let modifyData = [];
   for (const [i, row] of data.entries()) {
     const overlayRow = [];
@@ -130,7 +144,7 @@ function doImport(csv, preview) {
   /**
    * Existing spreadsheet transactions for comparison.
    *
-   * @type {(string | number | Date)[][]}
+   * @type {(CellValue | Date)[][]}
    */
   let tData;
   if (modifyData.length > 0) {
@@ -152,13 +166,18 @@ function doImport(csv, preview) {
       );
     }
     return {
+      crosswalk,
+      crosswalks,
       nAdd: addData.length,
       nModify,
       nTotal: data.length,
-      header: headerRow.map(
-        (name) =>
-          /** @type {const} */ ([name, tHeader.get(name) !== undefined]),
-      ),
+      header: headerRow.map((name, j) => ({
+        name,
+        found: tHeader.get(name) !== undefined,
+        error: /** @type {Partial<DetailedCellError>?} */ (data[0]?.[j])
+          ?.message,
+        summary: summarize(data, j),
+      })),
     };
   }
   add();
@@ -279,18 +298,203 @@ function zip(...iterables) {
 }
 
 /**
+ * Remap CSV via the crosswalks sheet.
+ *
+ * @param {readonly string[]} headerRow
+ * @param {readonly string[][]} data
+ * @param {unknown} crosswalk
+ */
+function remap(headerRow, data, crosswalk) {
+  const sheet = /** @type {GoogleAppsScript.Spreadsheet.Sheet} */ (
+    ss.getSheetByName("Crosswalks")
+  );
+  if (sheet === null) {
+    Logger.log("Crosswalks sheet not found");
+    return {
+      headerRow,
+      data,
+      crosswalk: "Native (bypass remap)",
+      crosswalks: [],
+    };
+  }
+  const range = sheet.getDataRange();
+  Logger.log(`Get crosswalks from range ${range.getA1Notation()}`);
+  /** @type {[readonly string[], ...(readonly (readonly unknown[])[])]} */
+  const [crosswalksHeaderRow, ...crosswalksData] = /** @type {never} */ (
+    getFormulasOrValues(range)
+  );
+  if (crosswalksHeaderRow === undefined) {
+    throw new Error("Empty crosswalks sheet");
+  }
+  const crosswalks = crosswalksData.map((row) => row[0]);
+  if (crosswalk === "Native (bypass remap)") {
+    Logger.log("Bypass remap");
+    return { headerRow, data, crosswalk: "Native (bypass remap)", crosswalks };
+  }
+  const options = {
+    licenseKey: "gpl-v3",
+    useArrayArithmetic: true,
+    dateFormats: [],
+  };
+  const hf = HyperFormula.buildFromArray(/** @type {never} */ (data), options);
+  /**
+   * Top left corner of the result. Load the CSV data and the crosswalk formulas
+   * side by side in a singular HyperFormula sheet.
+   */
+  const start = { sheet: 0, row: 0, col: headerRow.length };
+  return crosswalk !== "" ? viaCrosswalk() : detectCrosswalk();
+
+  function viaCrosswalk() {
+    Logger.log(`Remap via ${crosswalk} crosswalk`);
+    const crosswalksRow = crosswalksData[crosswalks.indexOf(crosswalk)];
+    const { names, formulas, literals } = filterAndPartition(
+      zip(crosswalksHeaderRow, crosswalksRow),
+    );
+    if (names === undefined) {
+      throw new Error("Empty crosswalk row/headers");
+    }
+    hf.setCellContents(start, [formulas.map((formula) => bind(formula))]);
+    const result = getResult(data.length, formulas.length);
+    for (const row of result) {
+      Object.assign(row, literals);
+    }
+    return { headerRow: names, data: result, crosswalk, crosswalks };
+  }
+
+  /**
+   * Find the first crosswalk without errors. Reading just the first row is
+   * faster than reading the whole result of each crosswalk.
+   */
+  function detectCrosswalk() {
+    for (const crosswalksRow of crosswalksData) {
+      const { names, formulas, literals } = filterAndPartition(
+        zip(crosswalksHeaderRow, crosswalksRow),
+      );
+      if (names === undefined) {
+        continue;
+      }
+      hf.setCellContents(start, [formulas.map((formula) => bind(formula))]);
+      if (
+        getResult(1, formulas.length)
+          .flat()
+          .some(
+            (value) =>
+              /** @type {Partial<DetailedCellError>?} */ (value)?.message !==
+              undefined,
+          )
+      ) {
+        continue;
+      }
+      Logger.log(`Detected ${crosswalksRow[0]} crosswalk`);
+      const result = getResult(data.length, formulas.length);
+      for (const row of result) {
+        Object.assign(row, literals);
+      }
+      return {
+        headerRow: names,
+        data: result,
+        crosswalk: crosswalksRow[0],
+        crosswalks,
+      };
+    }
+    Logger.log("No compatible crosswalk detected");
+    return { headerRow, data, crosswalk: "Native (bypass remap)", crosswalks };
+  }
+
+  /**
+   * For some reason HyperFormula treats named ranges differently from address
+   * ranges, so substitute addresses for CSV header names statically. It is less
+   * intelligent than using named expressions but good enough for now? and maybe
+   * HyperFormula will get there?
+   *
+   * @param {string} formula
+   */
+  function bind(formula) {
+    for (const [j, name] of headerRow.entries()) {
+      const pattern = `(?<!")\\b${name.replace(/[^0-9A-Z_]/gi, "")}\\b`;
+      const start = { sheet: 0, row: 0, col: j };
+      const end = { sheet: 0, row: data.length - 1, col: j };
+      const a1Notation = hf.simpleCellRangeToString({ start, end });
+      formula = formula.replace(new RegExp(pattern, "gi"), `{${a1Notation}}`);
+    }
+    return formula;
+  }
+
+  /**
+   * @param {number} m
+   * @param {number} n
+   */
+  function getResult(m, n) {
+    const end = { sheet: 0, row: m - 1, col: start.col + n - 1 };
+    return hf.getRangeValues({ start, end });
+  }
+}
+
+/**
+ * Support either formulas or literals.
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Range} range
+ */
+function getFormulasOrValues(range) {
+  const formulasOrValues = range.getValues();
+  // Not sparse too bad
+  const formulas = range.getFormulas();
+  for (const [i, row] of formulasOrValues.entries()) {
+    for (const [j, formula] of formulas[i].entries()) {
+      if (formula !== "") {
+        row[j] = formula;
+      }
+    }
+  }
+  return formulasOrValues;
+}
+
+/**
+ * Ignore empty headers/cells and partition formulas and literals.
+ *
+ * @param {IteratorObject<readonly [string, unknown]>} entries
+ */
+function filterAndPartition(entries) {
+  /** @type {[readonly string[], readonly unknown[]] | []} */
+  const [names, values] = /** @type {never} */ (
+    zip(...entries.filter(([name, value]) => name !== "" && value !== ""))
+  );
+  if (values === undefined) {
+    return {};
+  }
+  /** @type {string[]} */
+  const formulas = [];
+  /** @type {unknown[]} */
+  const literals = [];
+  for (const [j, value] of values.entries()) {
+    (typeof value === "string" && value.startsWith("=") ? formulas : literals)[
+      j
+    ] = value;
+  }
+  return { names, formulas, literals };
+}
+
+/**
  * Parse the date and derive the month and week columns.
  *
  * @param {Map<string, number>} header
- * @param {readonly (string | number | Date)[][]} data
+ * @param {readonly (CellValue | Date)[][]} data
  */
 function prepDate(header, data) {
   const jDate = header.get("Date");
-  if (jDate === undefined) {
+  if (
+    jDate === undefined ||
+    /** @type {Partial<DetailedCellError>?} */ (data[0]?.[jDate])?.message !==
+      undefined
+  ) {
     return;
   }
+  // Nulls, booleans, numbers and numeric strings are all invalid
   for (const row of data) {
-    row[jDate] = new Date(row[jDate]);
+    const value = row[jDate];
+    row[jDate] = new Date(
+      /** @type {never} */ (isNaN(/** @type {never} */ (value)) ? value : NaN),
+    );
   }
   /**
    * JS interprets yyyy-MM-dd strings using UTC and other strings without
@@ -398,17 +602,19 @@ const dateTimeStringFormat = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'";
  * prepID().
  *
  * @param {ReadonlyMap<string, number>} header
- * @param {Iterable<(string | number | Date)[]>} data
+ * @param {readonly (CellValue | Date)[][]} data
  */
 function prepAmount(header, data) {
   const jAmount = header.get("Amount");
-  if (jAmount === undefined) {
+  if (
+    jAmount === undefined ||
+    /** @type {Partial<DetailedCellError>?} */ (data[0]?.[jAmount])?.message !==
+      undefined
+  ) {
     return;
   }
   for (const row of data) {
-    row[jAmount] = Number(
-      /** @type {string} */ (row[jAmount]).replace(/[$,]/g, ""),
-    );
+    row[jAmount] = Number(String(row[jAmount]).replace(/[$,]/g, ""));
   }
 }
 
@@ -416,7 +622,7 @@ function prepAmount(header, data) {
  * Derive the description and full description from either column.
  *
  * @param {Map<string, number>} header
- * @param {Iterable<(string | number | Date)[]>} data
+ * @param {readonly (CellValue | Date)[][]} data
  */
 function prepDescription(header, data) {
   if (
@@ -428,14 +634,18 @@ function prepDescription(header, data) {
   const j = /** @type {number} */ (
     header.get("Full Description") ?? header.get("Description")
   );
+  if (
+    /** @type {Partial<DetailedCellError>?} */ (data[0]?.[j])?.message !==
+    undefined
+  ) {
+    return;
+  }
   const jDescription = header.get("Description") ?? header.size;
   header.set("Description", jDescription);
   const jFullDescription = header.get("Full Description") ?? header.size;
   header.set("Full Description", jFullDescription);
   for (const row of data) {
-    row[jDescription] = toDescription(
-      /** @type {never} */ (row[jFullDescription] = row[j]),
-    );
+    row[jDescription] = toDescription(String((row[jFullDescription] = row[j])));
   }
 }
 
@@ -550,7 +760,7 @@ function toDescription(fullDescription) {
  * Give transactions content IDs so we do not import them again, at least.
  *
  * @param {Map<string, number>} header
- * @param {Iterable<(string | number | Date)[]>} data
+ * @param {Iterable<(CellValue | Date)[]>} data
  * @param {ReadonlyMap<unknown, number>} tHeader
  */
 function prepID(header, data, tHeader) {
@@ -576,9 +786,9 @@ function prepID(header, data, tHeader) {
   canonical.sort();
   /** Do not give identical transactions duplicate IDs. */
   const groups =
-    /** @type {Readonly<Record<string, readonly (string | number | Date)[][]>>} */ (
+    /** @type {Readonly<Record<string, readonly (CellValue | Date)[][]>>} */ (
       Object.groupBy(data, (row) => {
-        /** @type {Record<string, string | number | Date>} */
+        /** @type {Record<string, CellValue | Date>} */
         const o = {};
         for (const name of canonical) {
           const value = row[/** @type {number} */ (header.get(name))];
@@ -608,8 +818,8 @@ const now = new Date();
  * Compare two Date objects as numbers (of milliseconds since the epoch) and
  * compare strings and numbers loosely.
  *
- * @param {string | number | Date} a
- * @param {string | number | Date} b
+ * @param {CellValue | Date} a
+ * @param {CellValue | Date} b
  * @returns {boolean}
  */
 function equals(a, b) {
@@ -619,10 +829,52 @@ function equals(a, b) {
 }
 
 /**
+ * Summarize constant-valued, numeric and date columns. Depends on earlier
+ * number and date preparation/normalization.
+ *
+ * @param {readonly (readonly (CellValue | Date)[])[]} data
+ * @param {number} j
+ */
+function summarize(data, j) {
+  const [first, ...rest] = data;
+  if (first === undefined) {
+    return;
+  }
+  if (first[j] instanceof Date) {
+    const column = data.map((row) => row[j]);
+    try {
+      return dateFormatter.formatRange(
+        Math.min(.../** @type {Iterable<never>} */ (column)),
+        Math.max(.../** @type {Iterable<never>} */ (column)),
+      );
+    } catch {
+      // Intl.DateTimeFormat chokes on invalid dates
+    }
+  }
+  const constant = String(first[j]);
+  if (rest.every((row) => String(row[j]) === constant)) {
+    return constant;
+  }
+  if (typeof first[j] === "number") {
+    let sum = 0;
+    for (const row of data) {
+      sum += /** @type {never} */ (row[j]);
+    }
+    return `Sum: ${numberFormatter.format(sum)}`;
+  }
+}
+
+const dateFormatter = new Intl.DateTimeFormat(undefined, {
+  timeZone: ssTimeZone,
+  dateStyle: "medium",
+});
+const numberFormatter = new Intl.NumberFormat();
+
+/**
  * Suppress data validation errors.
  *
  * @param {GoogleAppsScript.Spreadsheet.Range} range
- * @param {(string | number | Date)[][]} values
+ * @param {(CellValue | Date)[][]} values
  */
 function noDataValidationSetValues(range, values) {
   const rules = range.getDataValidations();
