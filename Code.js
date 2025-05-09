@@ -1,4 +1,4 @@
-/** @import {CellValue, DetailedCellError} from "hyperformula" */
+/** @import {CellValue, DetailedCellError, PluginFunctionType} from "hyperformula" */
 
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
@@ -328,6 +328,7 @@ function remap(headerRow, data, crosswalk) {
     Logger.log("Bypass remap");
     return { headerRow, data, crosswalk: "Native (bypass remap)", crosswalks };
   }
+  registerParseDate();
   const options = {
     licenseKey: "gpl-v3",
     useArrayArithmetic: true,
@@ -419,6 +420,64 @@ function remap(headerRow, data, crosswalk) {
     return hf.getRangeValues({ start, end });
   }
 }
+
+/**
+ * Expose Utilities.parseDate() as a custom function, for formats JS does not
+ * understand. To use the spreadsheet time zone call the function with just the
+ * two remaining arguments, `date` and `format`.
+ */
+function registerParseDate() {
+  class ParseDatePlugin extends HyperFormula.FunctionPlugin {
+    /** @type {PluginFunctionType} */
+    parseDate(ast, state) {
+      return this.runFunction(
+        ast.args,
+        state,
+        this.metadata("PARSEDATE"),
+        /** @param {[string, string, string?]} args */
+        (...args) => {
+          let date,
+            timeZone = ssTimeZone,
+            format;
+          switch (/** @type {2 | -1} */ (args.lastIndexOf(undefined))) {
+            case 2:
+              [date, format] = args;
+              break;
+            case -1:
+              [date, timeZone, format] = args;
+              break;
+          }
+          try {
+            return Utilities.parseDate(
+              date,
+              timeZone,
+              /** @type {NonNullable<typeof format>} */ (format),
+            ).toJSON();
+          } catch (e) {
+            return /** @type {never} */ (e);
+          }
+        },
+      );
+    }
+  }
+  ParseDatePlugin.implementedFunctions = {
+    PARSEDATE: {
+      method: "parseDate",
+      parameters: [
+        { argumentType: HyperFormula.FunctionArgumentType.STRING },
+        { argumentType: HyperFormula.FunctionArgumentType.STRING },
+        {
+          argumentType: HyperFormula.FunctionArgumentType.STRING,
+          optionalArg: true,
+        },
+      ],
+    },
+  };
+  HyperFormula.registerFunctionPlugin(ParseDatePlugin, translations);
+}
+
+/** HyperFormula's default language. */
+const translations = { enGB: { PARSEDATE: "PARSEDATE" } };
 
 /**
  * Support either formulas or literals.
