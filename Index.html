@@ -7,7 +7,7 @@
       href="https://ssl.gstatic.com/docs/script/css/add-ons1.css"
     />
   </head>
-  <body>
+  <body class="sidebar">
     <form onsubmit="onSubmit(event)">
       <div class="block">
         <input
@@ -29,9 +29,7 @@
       <div class="block">
         <div hidden>
           <button id="submit" class="action"></button>
-          <button type="button" onclick="google.script.host.close()">
-            Cancel
-          </button>
+          <button type="button" onclick="onClick(event)">Cancel</button>
         </div>
       </div>
     </form>
