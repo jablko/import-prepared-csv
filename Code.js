@@ -12,8 +12,10 @@ function onOpen() {
 
 function start() {
   const ui = SpreadsheetApp.getUi();
-  const html = HtmlService.createHtmlOutputFromFile("Index");
-  ui.showModalDialog(html, "Import prepared CSV");
+  const html = HtmlService.createHtmlOutputFromFile("Index").setTitle(
+    "Import prepared CSV",
+  );
+  ui.showSidebar(html);
 }
 
 /**
