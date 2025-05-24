@@ -181,8 +181,6 @@ function doImport(csv, crosswalk, preview) {
       header: headerRow.map((name, j) => ({
         name,
         found: tHeader.get(name) !== undefined,
-        error: /** @type {Partial<DetailedCellError>?} */ (data[0]?.[j])
-          ?.message,
         summary: summarize(data, j),
       })),
     };
@@ -354,9 +352,9 @@ function remap(headerRow, data, crosswalk) {
 
   function viaCrosswalk() {
     Logger.log(`Remap via ${crosswalk} crosswalk`);
-    const crosswalksRow = crosswalksData[crosswalks.indexOf(crosswalk)];
+    const i = crosswalks.indexOf(crosswalk);
     const { names, formulas, literals } = filterAndPartition(
-      zip(crosswalksHeaderRow, crosswalksRow),
+      zip(crosswalksHeaderRow, crosswalksData[i]),
     );
     if (names === undefined) {
       throw new Error("Empty crosswalk row/headers");
@@ -365,6 +363,13 @@ function remap(headerRow, data, crosswalk) {
     const result = getResult(data.length, formulas.length);
     for (const row of result) {
       Object.assign(row, literals);
+    }
+    /** HyperFormula columns back -> crosswalks columns. */
+    const sourceMap = zip(crosswalksHeaderRow, crosswalksData[i]).flatMap(
+      ([name, value], j) => (name !== "" && value !== "" ? [j] : []),
+    );
+    for (const [value, j] of zip(result[0], sourceMap)) {
+      linkToSource(value, sheet, i, j);
     }
     return { headerRow: names, data: result, crosswalk, crosswalks };
   }
@@ -538,6 +543,25 @@ function filterAndPartition(entries) {
     ] = value;
   }
   return { names, formulas, literals };
+}
+
+/**
+ * Link from errors back to the formulas they came from.
+ *
+ * @param {CellValue} value
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
+ * @param {number} i
+ * @param {number} j
+ */
+function linkToSource(value, sheet, i, j) {
+  if (
+    /** @type {Partial<DetailedCellError>?} */ (value)?.message === undefined
+  ) {
+    return;
+  }
+  const range = sheet.getRange(1 + i + 1, j + 1);
+  /** @type {{ url?: unknown }} */ (value).url =
+    `${ss.getUrl()}?gid=${sheet.getSheetId()}&range=${range.getA1Notation()}`;
 }
 
 /**
@@ -906,6 +930,11 @@ function summarize(data, j) {
   if (first === undefined) {
     return;
   }
+  if (
+    /** @type {Partial<DetailedCellError>?} */ (first[j])?.message !== undefined
+  ) {
+    return first[j];
+  }
   if (first[j] instanceof Date) {
     const column = data.map((row) => row[j]);
     try {
@@ -950,4 +979,18 @@ function noDataValidationSetValues(range, values) {
   } finally {
     range.setDataValidations(rules);
   }
+}
+
+/**
+ * Expose activate() to google.script.run (client-side).
+ *
+ * @param {number} id
+ * @param {string} a1Notation
+ */
+function activate(id, a1Notation) {
+  const sheet = ss.getSheetById(id);
+  if (sheet === null) {
+    throw new Error(`Sheet ${id} not found`);
+  }
+  sheet.getRange(a1Notation).activate();
 }
